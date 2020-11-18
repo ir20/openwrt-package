@@ -8,7 +8,7 @@ require 'luci.model.uci'
 require 'luci.util'
 require 'luci.jsonc'
 require 'luci.sys'
-local _api = require "luci.model.cbi.passwall.api.api"
+local api = require "luci.model.cbi.passwall.api.api"
 
 -- these global functions are accessed all the time by the event handler
 -- so caching them is worth the effort
@@ -84,6 +84,16 @@ do
 			end
 		}
 	end)
+
+	local tcp_main1 = ucic2:get(application, "@auto_switch[0]", "tcp_main1") or "nil"
+	CONFIG[#CONFIG + 1] = {
+		log = false,
+		remarks = "自动切换TCP_1主节点",
+		currentNode = ucic2:get_all(application, tcp_main1),
+		set = function(server)
+			ucic2:set(application, "@auto_switch[0]", "tcp_main1", server)
+		end
+	}
 
 	local tcp_node1_table = ucic2:get(application, "@auto_switch[0]", "tcp_node1")
 	if tcp_node1_table then
@@ -305,7 +315,7 @@ local function base64Decode(text)
 end
 -- 处理数据
 local function processData(szType, content, add_mode)
-	log(content, add_mode)
+	--log(content, add_mode)
 	local result = {
 		timeout = 60,
 		add_mode = add_mode,
@@ -317,8 +327,8 @@ local function processData(szType, content, add_mode)
 		result.type = "SSR"
 		result.address = hostInfo[1]
 		result.port = hostInfo[2]
-		result.ssr_protocol = hostInfo[3]
-		result.ssr_encrypt_method = hostInfo[4]
+		result.protocol = hostInfo[3]
+		result.method = hostInfo[4]
 		result.obfs = hostInfo[5]
 		result.password = base64Decode(hostInfo[6])
 		local params = {}
@@ -339,7 +349,7 @@ local function processData(szType, content, add_mode)
 		result.protocol = 'vmess'
 		result.transport = info.net
 		result.alter_id = info.aid
-		result.vmess_id = info.id
+		result.uuid = info.id
 		result.remarks = info.ps
 		-- result.mux = 1
 		-- result.mux_concurrency = 8
@@ -421,20 +431,20 @@ local function processData(szType, content, add_mode)
 				local plugin_info = UrlDecode(params.plugin)
 				local idx_pn = plugin_info:find(";")
 				if idx_pn then
-					result.ss_plugin = plugin_info:sub(1, idx_pn - 1)
-					result.ss_plugin_opts =
+					result.plugin = plugin_info:sub(1, idx_pn - 1)
+					result.plugin_opts =
 						plugin_info:sub(idx_pn + 1, #plugin_info)
 				else
-					result.ss_plugin = plugin_info
+					result.plugin = plugin_info
 				end
 			end
-			if result.ss_plugin and result.ss_plugin == "simple-obfs" then
-				result.ss_plugin = "obfs-local"
+			if result.plugin and result.plugin == "simple-obfs" then
+				result.plugin = "obfs-local"
 			end
 		else
 			result.port = host[2]
 		end
-		result.ss_encrypt_method = method
+		result.method = method
 		result.password = password
 	elseif szType == "trojan" then
 		local alias = ""
@@ -443,7 +453,7 @@ local function processData(szType, content, add_mode)
 			alias = content:sub(idx_sp + 1, -1)
 			content = content:sub(0, idx_sp - 1)
 		end
-		result.type = "Trojan"
+		result.type = "Trojan-Plus"
 		result.remarks = UrlDecode(alias)
 		if content:find("@") then
 			local Info = split(content, "@")
@@ -566,16 +576,16 @@ local function processData(szType, content, add_mode)
 		result.address = content.server
 		result.port = content.port
 		result.password = content.password
-		result.ss_encrypt_method = content.encryption
-		result.ss_plugin = content.plugin
-		result.ss_plugin_opts = content.plugin_options
+		result.method = content.encryption
+		result.plugin = content.plugin
+		result.plugin_opts = content.plugin_options
 		result.group = content.airport
 		result.remarks = content.remarks
 	else
 		log('暂时不支持' .. szType .. "类型的节点订阅，跳过此节点。")
 		return nil
 	end
-	if not result.remarks then
+	if not result.remarks or result.remarks == "" then
 		if result.address and result.port then
 			result.remarks = result.address .. ':' .. result.port
 		else
@@ -669,11 +679,11 @@ local function select_node(nodes, config)
 				end
 			end
 		end
-		-- 第二优先级 IP + 端口
+		-- 第二优先级 类型 + IP + 端口
 		if not server then
 			for id, node in pairs(nodes) do
-				if node.address and node.port then
-					if node.address .. ':' .. node.port == config.currentNode.address .. ':' .. config.currentNode.port then
+				if node.type and node.address and node.port then
+					if node.type == config.currentNode.type and (node.address .. ':' .. node.port == config.currentNode.address .. ':' .. config.currentNode.port) then
 						if config.log == nil or config.log == true then
 							log('选择【' .. config.remarks .. '】第二匹配节点：' .. node.remarks)
 						end
@@ -683,11 +693,11 @@ local function select_node(nodes, config)
 				end
 			end
 		end
-		-- 第三优先级 IP
+		-- 第三优先级 IP + 端口
 		if not server then
 			for id, node in pairs(nodes) do
-				if node.address then
-					if node.address == config.currentNode.address then
+				if node.address and node.port then
+					if node.address .. ':' .. node.port == config.currentNode.address .. ':' .. config.currentNode.port then
 						if config.log == nil or config.log == true then
 							log('选择【' .. config.remarks .. '】第三匹配节点：' .. node.remarks)
 						end
@@ -697,13 +707,27 @@ local function select_node(nodes, config)
 				end
 			end
 		end
-		-- 第四优先级备注
+		-- 第四优先级 IP
+		if not server then
+			for id, node in pairs(nodes) do
+				if node.address then
+					if node.address == config.currentNode.address then
+						if config.log == nil or config.log == true then
+							log('选择【' .. config.remarks .. '】第四匹配节点：' .. node.remarks)
+						end
+						server = id
+						break
+					end
+				end
+			end
+		end
+		-- 第五优先级备注
 		if not server then
 			for id, node in pairs(nodes) do
 				if node.remarks then
 					if node.remarks == config.currentNode.remarks then
 						if config.log == nil or config.log == true then
-							log('选择【' .. config.remarks .. '】第四匹配节点：' .. node.remarks)
+							log('选择【' .. config.remarks .. '】第五匹配节点：' .. node.remarks)
 						end
 						server = id
 						break
@@ -741,7 +765,7 @@ local function update_node(manual)
 	end)
 	for _, v in ipairs(nodeResult) do
 		for _, vv in ipairs(v) do
-			local uuid = _api.gen_uuid()
+			local uuid = api.gen_uuid()
 			local cfgid = ucic2:section(application, uciType, uuid)
 			cfgid = uuid
 			for kkk, vvv in pairs(vv) do
@@ -841,14 +865,14 @@ local function parse_link(raw, remark, manual)
 				end
 				-- log(result)
 				if result then
-					if is_filter_keyword(result.remarks) or
+					if (not manual and is_filter_keyword(result.remarks)) or
 						not result.address or
 						result.remarks == "NULL" or
 						result.address:match("[^0-9a-zA-Z%-%_%.%s]") or -- 中文做地址的 也没有人拿中文域名搞，就算中文域也有Puny Code SB 机场
 						not result.address:find("%.") or -- 虽然没有.也算域，不过应该没有人会这样干吧
 						result.address:sub(#result.address) == "." -- 结尾是.
 					then
-						log('丢弃无效节点: ' .. result.type .. ' 节点, ' .. result.remarks)
+						log('丢弃过滤节点: ' .. result.type .. ' 节点, ' .. result.remarks)
 					else
 						tinsert(all_nodes, result)
 					end
